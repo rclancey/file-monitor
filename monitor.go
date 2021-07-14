@@ -5,24 +5,29 @@ import (
 	"time"
 )
 
-type FileMonitor struct {
+type FileChange struct {
 	FileName string
+	ModTime time.Time
+}
+
+type FileMonitor struct {
+	FileNames []string
 	Interval time.Duration
 	IdleTime time.Duration
-	C chan time.Time
+	C chan FileChange
 	ticker *time.Ticker
 	quit chan bool
 }
 
-func NewFileMonitor(fn string, interval, idle time.Duration) *FileMonitor {
+func NewFileMonitor(interval, idle time.Duration, fns ...string) *FileMonitor {
 	if interval <= 100 * time.Millisecond {
 		interval = 100 * time.Millisecond
 	}
 	fm := &FileMonitor{
-		FileName: fn,
+		FileNames: fns,
 		Interval: interval,
 		IdleTime: idle,
-		C: make(chan time.Time, 10),
+		C: make(chan FileChange, 10),
 		ticker: nil,
 	}
 	fm.Start()
@@ -33,7 +38,7 @@ func (fm *FileMonitor) Start() {
 	fm.Stop()
 	quit := make(chan bool, 2)
 	fm.quit = quit
-	var lastMod *time.Time
+	lastMod := map[string]time.Time{}
 	tick := time.NewTicker(fm.Interval)
 	fm.ticker = tick
 	go func() {
@@ -42,22 +47,26 @@ func (fm *FileMonitor) Start() {
 			case <-quit:
 				return
 			case <-tick.C:
-				st, err := os.Stat(fm.FileName)
-				if err == nil {
-					lm := st.ModTime()
-					if time.Now().Sub(lm) >= fm.IdleTime {
-						if lastMod == nil {
-							lastMod = &lm
-							fm.C <- lm
-						} else if lm.After(*lastMod) {
-							lastMod = &lm
-							fm.C <- lm
+				for _, fn := range fm.FileNames {
+					st, err := os.Stat(fn)
+					if err == nil {
+						lm := st.ModTime()
+						if time.Now().Sub(lm) >= fm.IdleTime {
+							xlm, ok := lastMod[fn]
+							if !ok {
+								lastMod[fn] = lm
+								fm.C <- FileChange{fn, lm}
+							} else if lm.After(xlm) {
+								lastMod[fn] = lm
+								fm.C <- FileChange{fn, lm}
+							}
 						}
-					}
-				} else {
-					if lastMod != nil {
-						lastMod = nil
-						fm.C <- time.Now()
+					} else {
+						_, ok := lastMod[fn]
+						if ok {
+							delete(lastMod, fn)
+							fm.C <- FileChange{fn, time.Now()}
+						}
 					}
 				}
 			}
